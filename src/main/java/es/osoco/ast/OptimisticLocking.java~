@@ -1,0 +1,43 @@
+package es.osoco.ast;
+
+import org.codehaus.groovy.transform.GroovyASTTransformationClass;
+
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+
+/**
+ * Marker interface to mark a Grails' controller action to check for stale data
+ * the optimistic locking approach. An AST transformation will later wire this 
+ * together. 
+ *
+ * @author Rafael Luque (OSOCO)
+ */
+@Retention(RetentionPolicy.SOURCE)
+@Target({ElementType.FIELD})
+@GroovyASTTransformationClass("es.osoco.transform.OptimisticLockingASTTransformation")
+public @interface OptimisticLocking {
+
+
+    final static String DEFAULT_REDIRECT_ACTION = "edit";
+    final static String DEFAULT_REDIRECT_PARAMS = "id";
+    final static String DEFAULT_FLASH_MESSAGE_CODE = "optimistic.locking.failure";
+
+
+    /**
+     * @return the action name to redirect in the case of stale data detected.
+     */
+    String redirect() default DEFAULT_REDIRECT_ACTION;
+
+    /**
+     * @return the comma-separated list of param names to be used in the redirection.
+     */
+    String params() default DEFAULT_REDIRECT_PARAMS;
+
+    /**
+     * @return the error message key to use in the case of stale data.
+     */
+    String messageCode() default DEFAULT_FLASH_MESSAGE_CODE;
+
+}

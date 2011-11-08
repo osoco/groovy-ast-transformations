@@ -1,0 +1,186 @@
+package es.osoco.transform;
+
+import es.osoco.ast.OptimisticLocking;
+
+import org.codehaus.groovy.ast.AnnotatedNode;
+import org.codehaus.groovy.ast.AnnotationNode;
+import org.codehaus.groovy.ast.ASTNode;
+import org.codehaus.groovy.ast.ClassNode;
+import org.codehaus.groovy.ast.FieldNode;
+import org.codehaus.groovy.ast.MethodNode;
+import org.codehaus.groovy.ast.Parameter;
+import org.codehaus.groovy.ast.expr.ArgumentListExpression;
+import org.codehaus.groovy.ast.expr.BinaryExpression;
+import org.codehaus.groovy.ast.expr.ClosureExpression;
+import org.codehaus.groovy.ast.expr.ConstantExpression;
+import org.codehaus.groovy.ast.expr.Expression;
+import org.codehaus.groovy.ast.expr.ListExpression;
+import org.codehaus.groovy.ast.expr.MapExpression;
+import org.codehaus.groovy.ast.expr.MethodCallExpression;
+import org.codehaus.groovy.ast.expr.PropertyExpression;
+import org.codehaus.groovy.ast.expr.VariableExpression;
+import org.codehaus.groovy.ast.stmt.BlockStatement;
+import org.codehaus.groovy.ast.stmt.CatchStatement;
+import org.codehaus.groovy.ast.stmt.EmptyStatement;
+import org.codehaus.groovy.ast.stmt.ExpressionStatement;
+import org.codehaus.groovy.ast.stmt.Statement;
+import org.codehaus.groovy.ast.stmt.TryCatchStatement;
+import org.codehaus.groovy.control.CompilePhase;
+import org.codehaus.groovy.control.SourceUnit;
+import org.codehaus.groovy.control.messages.SyntaxErrorMessage;
+import org.codehaus.groovy.syntax.SyntaxException;
+import org.codehaus.groovy.syntax.Token;
+import org.codehaus.groovy.transform.ASTTransformation;
+import org.codehaus.groovy.transform.GroovyASTTransformation;
+
+import org.springframework.dao.OptimisticLockingFailureException;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.StringTokenizer;
+
+/**
+ * Handles generation of code for the @OptimisticLocking closure annotation.
+ *
+ * @author Rafael Luque (OSOCO)
+ */
+@GroovyASTTransformation(phase=CompilePhase.SEMANTIC_ANALYSIS)
+public class OptimisticLockingASTTransformation implements ASTTransformation
+{
+
+    /**
+     * This is the call made when the compiler encounters the {@code @OptimisticLocking} annotation.
+     *
+     * @param nodes   the AST nodes
+     * @param source  the source unit for the nodes
+     */
+    public void visit(ASTNode[] nodes, SourceUnit source) 
+    {
+        // safeguards against NullPointerExceptions and unexpected input
+        if (nodes.length != 2 || !(nodes[0] instanceof AnnotationNode) || !(nodes[1] instanceof AnnotatedNode)) {
+            addError("Internal error: expecting [AnnotationNode, AnnotatedNode] but got: " + Arrays.asList(nodes), nodes[0], source);
+        }
+
+        AnnotationNode annotation = (AnnotationNode)nodes[0];
+        FieldNode field = (FieldNode)nodes[1];
+
+        ClosureExpression closure = (ClosureExpression)field.getInitialValueExpression();
+        List statements = ((BlockStatement)closure.getCode()).getStatements();
+
+        String redirectValue = lookupMemberValue(annotation, "redirect", OptimisticLocking.DEFAULT_REDIRECT_ACTION);
+        String messageCodeValue = lookupMemberValue(annotation, "messageCode", OptimisticLocking.DEFAULT_FLASH_MESSAGE_CODE);
+        String paramsValue = lookupMemberValue(annotation, "params", OptimisticLocking.DEFAULT_REDIRECT_PARAMS);
+        List<String> paramList = tokenize(paramsValue);
+
+        traceAST(field.getDeclaringClass(), field);
+
+        CatchStatement optimisticCatchStatement = 
+            createOptimisticCatchStatement(redirectValue, messageCodeValue, paramList);
+        BlockStatement tryStatement = new BlockStatement();
+        tryStatement.addStatements(statements);
+        Statement optimisticTryCatch = createTryCatchStatement(tryStatement, optimisticCatchStatement);
+            
+        statements.clear();
+        statements.add(optimisticTryCatch);
+    }
+
+
+    public void addError(String msg, ASTNode expr, SourceUnit source) {
+        int line = expr.getLineNumber();
+        int col = expr.getColumnNumber();
+        source.getErrorCollector().addErrorAndContinue(
+                new SyntaxErrorMessage(new SyntaxException(msg + '\n', line, col), source)
+        );
+    }
+
+    private String lookupMemberValue(AnnotationNode annotation, String memberName, String defaultValue) {        
+        Expression member = annotation.getMember(memberName);
+        if (member != null && member.getText() != null) {
+            return member.getText();
+        } else {
+            return defaultValue;
+        }
+    }
+
+    private Statement createTryCatchStatement(Statement tryStatement, CatchStatement catchStatement) 
+    {
+        TryCatchStatement tryCatch = new TryCatchStatement(tryStatement, EmptyStatement.INSTANCE);
+        tryCatch.addCatch(catchStatement);
+        return tryCatch;
+    }
+
+    private CatchStatement createOptimisticCatchStatement(
+        String redirectValue, 
+        String messageCodeValue, 
+        List<String> params) 
+    {                
+        BlockStatement code = new BlockStatement();
+
+        Expression flashExpr = new PropertyExpression(new VariableExpression("flash"), "message");
+        MapExpression messageMapExpr = new MapExpression();
+        messageMapExpr.addMapEntryExpression(
+            new ConstantExpression("code"), 
+            new ConstantExpression(messageCodeValue));
+        Expression messageCallExpr =
+            new MethodCallExpression(
+                new VariableExpression("this"), 
+                "message", 
+                new ArgumentListExpression(messageMapExpr));       
+
+        code.addStatement(new ExpressionStatement(
+            new BinaryExpression(flashExpr, Token.newSymbol("=",-1,-1), messageCallExpr)));
+
+        MapExpression redirectMapExpr = new MapExpression();
+        redirectMapExpr.addMapEntryExpression(
+            new ConstantExpression("action"), 
+            new ConstantExpression(redirectValue));
+        ListExpression paramListExpr = new ListExpression();
+        for (String paramName: params)
+        {
+            paramListExpr.addExpression(new ConstantExpression(paramName));
+        }
+        MethodCallExpression paramsSubMapExpr = new MethodCallExpression(
+            new VariableExpression("params"),
+            "subMap",
+            new ArgumentListExpression(paramListExpr));
+        redirectMapExpr.addMapEntryExpression(
+            new ConstantExpression("params"), 
+            paramsSubMapExpr);
+        Expression redirectCallExpr =
+            new MethodCallExpression(
+                new VariableExpression("this"), 
+                "redirect", 
+                new ArgumentListExpression(redirectMapExpr));
+
+        code.addStatement(new ExpressionStatement(redirectCallExpr));
+
+        CatchStatement catchStatement = 
+            new CatchStatement(
+                new Parameter(new ClassNode(OptimisticLockingFailureException.class), "olfe"),
+                code);
+        return catchStatement;
+    }
+
+    private void traceAST(ClassNode classNode, FieldNode field)
+    {
+        System.out.println("Annotating [" +
+            field.getDeclaringClass() +
+            " >> " +
+            field.getName() +
+            "] closure with @OptimisticLocking");        
+    }
+
+    private List<String> tokenize(String commaSeparatedValues)
+    {
+        List tokens = new ArrayList();
+        StringTokenizer tokenizer = new StringTokenizer(commaSeparatedValues, ", ");
+        while (tokenizer.hasMoreTokens())
+        {
+            tokens.add(tokenizer.nextToken());
+        }
+        return tokens;
+    }
+
+}
